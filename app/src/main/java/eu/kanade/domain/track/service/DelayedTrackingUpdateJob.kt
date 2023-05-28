@@ -34,18 +34,16 @@ class DelayedTrackingUpdateJob(context: Context, workerParams: WorkerParameters)
         val delayedTrackingStore = Injekt.get<DelayedTrackingStore>()
 
         val itemsToRemove = mutableListOf<Int>()
-        val results = withIOContext {
-            val tracks = delayedTrackingStore.getItems()
-                .map {
-                    val track = getTracks.awaitOne(it.trackId)
-                    if (track == null) {
-                        itemsToRemove.add(it.trackId.toInt())
-                        null
-                    } else {
-                        track.copy(lastChapterRead = it.lastChapterRead.toDouble())
-                    }
+        withIOContext {
+            val tracks = delayedTrackingStore.getItems().mapNotNull {
+                val track = getTracks.awaitOne(it.trackId)
+                if (track != null) {
+                    track.copy(lastChapterRead = it.lastChapterRead.toDouble())
+                } else {
+                    itemsToRemove.add(it.trackId.toInt())
+                    null
                 }
-                .filterNotNull()
+            }
 
             tracks.mapNotNull { track ->
                 try {
@@ -57,7 +55,6 @@ class DelayedTrackingUpdateJob(context: Context, workerParams: WorkerParameters)
                             launch { insertTrack.await(track) }
                         }
                         itemsToRemove.add(track.id.toInt())
-                        null
                     } else {
                         null
                     }
