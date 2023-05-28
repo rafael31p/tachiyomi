@@ -12,6 +12,8 @@ import eu.kanade.domain.track.model.toDbTrack
 import eu.kanade.domain.track.store.DelayedTrackingStore
 import eu.kanade.tachiyomi.data.track.TrackManager
 import eu.kanade.tachiyomi.util.system.workManager
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.launch
 import logcat.LogPriority
 import tachiyomi.core.util.lang.withIOContext
 import tachiyomi.core.util.system.logcat
@@ -31,33 +33,42 @@ class DelayedTrackingUpdateJob(context: Context, workerParams: WorkerParameters)
         val trackManager = Injekt.get<TrackManager>()
         val delayedTrackingStore = Injekt.get<DelayedTrackingStore>()
 
+        val itemsToRemove = mutableListOf<Int>()
         val results = withIOContext {
-            delayedTrackingStore.getItems()
-                .mapNotNull {
+            val tracks = delayedTrackingStore.getItems()
+                .map {
                     val track = getTracks.awaitOne(it.trackId)
                     if (track == null) {
-                        delayedTrackingStore.remove(it.trackId)
-                    }
-                    track?.copy(lastChapterRead = it.lastChapterRead.toDouble())
-                }
-                .mapNotNull { track ->
-                    try {
-                        val service = trackManager.getService(track.syncId)
-                        if (service != null && service.isLogged) {
-                            logcat(LogPriority.DEBUG) { "Updating delayed track item: ${track.id}, last chapter read: ${track.lastChapterRead}" }
-                            service.update(track.toDbTrack(), true)
-                            insertTrack.await(track)
-                        }
-                        delayedTrackingStore.remove(track.id)
+                        itemsToRemove.add(it.trackId.toInt())
                         null
-                    } catch (e: Exception) {
-                        logcat(LogPriority.ERROR, e)
-                        false
+                    } else {
+                        track.copy(lastChapterRead = it.lastChapterRead.toDouble())
                     }
                 }
-        }
+                .filterNotNull()
 
-        return if (results.isNotEmpty()) Result.failure() else Result.success()
+            tracks.mapNotNull { track ->
+                try {
+                    val service = trackManager.getService(track.syncId)
+                    if (service != null && service.isLogged) {
+                        logcat(LogPriority.DEBUG) { "Updating delayed track item: ${track.id}, last chapter read: ${track.lastChapterRead}" }
+                        coroutineScope {
+                            launch { service.update(track.toDbTrack(), true) }
+                            launch { insertTrack.await(track) }
+                        }
+                        itemsToRemove.add(track.id.toInt())
+                        null
+                    } else {
+                        null
+                    }
+                } catch (e: Exception) {
+                    logcat(LogPriority.ERROR, e)
+                    false
+                }
+            }
+        }
+        itemsToRemove.forEach { delayedTrackingStore.remove(it.toLong()) }
+        return Result.success()
     }
 
     companion object {
